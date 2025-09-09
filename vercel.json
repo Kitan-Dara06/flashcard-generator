@@ -1,27 +1,13 @@
 {
-  "version": 2,
   "functions": {
-    "api/**/*.py": {
-      "runtime": "@vercel/python@4.3.0"
+    "api/generate_flashcards.py": {
+      "runtime": "python@3.9"
     }
   },
-  "headers": [
+  "rewrites": [
     {
       "source": "/api/(.*)",
-      "headers": [
-        {
-          "key": "Access-Control-Allow-Origin",
-          "value": "*"
-        },
-        {
-          "key": "Access-Control-Allow-Methods",
-          "value": "GET, POST, PUT, DELETE, OPTIONS"
-        },
-        {
-          "key": "Access-Control-Allow-Headers",
-          "value": "Content-Type, Authorization"
-        }
-      ]
+      "destination": "/api/$1"
     }
   ]
 }
