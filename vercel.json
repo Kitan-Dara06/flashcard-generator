@@ -1,7 +1,7 @@
 {
   "functions": {
     "api/generate_flashcards.py": {
-      "runtime": "python@3.9"
+      "runtime": "vercel-python@0.5.0"
     }
   },
   "rewrites": [
