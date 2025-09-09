@@ -1,4 +1,4 @@
-from http.server import BaseHTTPRequestHandler
+# api/generate_flashcards.py
 import json
 import io
 import os
@@ -85,73 +85,98 @@ def generate_flashcards(text, api_key):
     except Exception as e:
         raise Exception(f"Error generating flashcards: {str(e)}")
 
-class handler(BaseHTTPRequestHandler):
-    def do_POST(self):
-        try:
-            # Get API key from environment
-            api_key = os.environ.get('OPENAI_API_KEY')
-            if not api_key:
-                self.send_error(500, "OpenAI API key not configured")
-                return
-            
-            # Parse request
-            content_length = int(self.headers['Content-Length'])
-            post_data = self.rfile.read(content_length)
-            data = json.loads(post_data.decode('utf-8'))
-            
-            file_content = base64.b64decode(data['file_content'])
-            file_type = data['file_type']
-            
-            # Extract text based on file type
-            if file_type == 'application/pdf':
-                text = extract_text_from_pdf(file_content)
-            elif file_type == 'text/plain':
-                text = file_content.decode('utf-8')
-            elif file_type == 'application/vnd.openxmlformats-officedocument.wordprocessingml.document':
-                text = extract_text_from_docx(file_content)
-            elif file_type == 'application/vnd.openxmlformats-officedocument.presentationml.presentation':
-                text = extract_text_from_pptx(file_content)
-            else:
-                self.send_error(400, "Unsupported file type")
-                return
-            
-            if not text.strip():
-                self.send_error(400, "Could not extract text from file")
-                return
-            
-            # Generate flashcards
-            flashcards = generate_flashcards(text, api_key)
-            
-            # Send response
-            self.send_response(200)
-            self.send_header('Content-type', 'application/json')
-            self.send_header('Access-Control-Allow-Origin', '*')
-            self.end_headers()
-            
-            response = {
+# Vercel requires a default handler function
+def handler(event, context):
+    if event['httpMethod'] == 'OPTIONS':
+        return {
+            'statusCode': 200,
+            'headers': {
+                'Access-Control-Allow-Origin': '*',
+                'Access-Control-Allow-Methods': 'POST, OPTIONS',
+                'Access-Control-Allow-Headers': 'Content-Type',
+            },
+            'body': ''
+        }
+
+    if event['httpMethod'] != 'POST':
+        return {
+            'statusCode': 405,
+            'headers': {'Content-Type': 'application/json'},
+            'body': json.dumps({'success': False, 'error': 'Method not allowed'})
+        }
+
+    try:
+        # Get API key from environment
+        api_key = os.environ.get('OPENAI_API_KEY')
+        if not api_key:
+            return {
+                'statusCode': 500,
+                'headers': {'Content-Type': 'application/json'},
+                'body': json.dumps({'success': False, 'error': 'OpenAI API key not configured'})
+            }
+        
+        # Parse request body
+        content_type = event['headers'].get('content-type', '')
+        if 'application/json' not in content_type:
+            return {
+                'statusCode': 400,
+                'headers': {'Content-Type': 'application/json'},
+                'body': json.dumps({'success': False, 'error': 'Content-Type must be application/json'})
+            }
+
+        body = json.loads(event['body'])
+        file_content = base64.b64decode(body['file_content'])
+        file_type = body['file_type']
+        
+        # Extract text based on file type
+        if file_type == 'application/pdf':
+            text = extract_text_from_pdf(file_content)
+        elif file_type == 'text/plain':
+            text = file_content.decode('utf-8')
+        elif file_type == 'application/vnd.openxmlformats-officedocument.wordprocessingml.document':
+            text = extract_text_from_docx(file_content)
+        elif file_type == 'application/vnd.openxmlformats-officedocument.presentationml.presentation':
+            text = extract_text_from_pptx(file_content)
+        else:
+            return {
+                'statusCode': 400,
+                'headers': {'Content-Type': 'application/json'},
+                'body': json.dumps({'success': False, 'error': 'Unsupported file type'})
+            }
+        
+        if not text.strip():
+            return {
+                'statusCode': 400,
+                'headers': {'Content-Type': 'application/json'},
+                'body': json.dumps({'success': False, 'error': 'Could not extract text from file'})
+            }
+        
+        # Generate flashcards
+        flashcards = generate_flashcards(text, api_key)
+        
+        # Return success response
+        return {
+            'statusCode': 200,
+            'headers': {
+                'Content-Type': 'application/json',
+                'Access-Control-Allow-Origin': '*'
+            },
+            'body': json.dumps({
                 'success': True,
                 'flashcards': flashcards,
                 'count': len(flashcards)
-            }
-            
-            self.wfile.write(json.dumps(response).encode('utf-8'))
-            
-        except Exception as e:
-            self.send_response(500)
-            self.send_header('Content-type', 'application/json')
-            self.send_header('Access-Control-Allow-Origin', '*')
-            self.end_headers()
-            
-            error_response = {
+            })
+        }
+        
+    except Exception as e:
+        return {
+            'statusCode': 500,
+            'headers': {
+                'Content-Type': 'application/json',
+                'Access-Control-Allow-Origin': '*'
+            },
+            'body': json.dumps({
                 'success': False,
                 'error': str(e)
-            }
-            
-            self.wfile.write(json.dumps(error_response).encode('utf-8'))
-    
-    def do_OPTIONS(self):
-        self.send_response(200)
-        self.send_header('Access-Control-Allow-Origin', '*')
-        self.send_header('Access-Control-Allow-Methods', 'POST, OPTIONS')
-        self.send_header('Access-Control-Allow-Headers', 'Content-Type')
-        self.end_headers()
+            })
+        }
