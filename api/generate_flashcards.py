@@ -1,0 +1,157 @@
+from http.server import BaseHTTPRequestHandler
+import json
+import io
+import os
+from typing import List
+import pdfplumber
+from langchain_openai import ChatOpenAI
+from langchain_core.prompts import ChatPromptTemplate, HumanMessagePromptTemplate
+from langchain_core.output_parsers import PydanticOutputParser
+from pydantic import BaseModel, Field
+import base64
+
+class Flashcard(BaseModel):
+    question: str = Field(description="The question on the flashcard")
+    answer: str = Field(description="The answer on the flashcard")
+
+class FlashcardList(BaseModel):
+    flashcards: List[Flashcard] = Field(description="List of flashcards")
+
+def extract_text_from_pdf(file_content):
+    try:
+        with pdfplumber.open(io.BytesIO(file_content)) as pdf:
+            return "\n".join([page.extract_text() or "" for page in pdf.pages])
+    except Exception as e:
+        return f"Error reading PDF: {e}"
+
+def extract_text_from_docx(file_content):
+    try:
+        from docx import Document
+        doc = Document(io.BytesIO(file_content))
+        return "\n".join([para.text for para in doc.paragraphs if para.text.strip()])
+    except Exception as e:
+        return f"Error reading DOCX: {e}"
+
+def extract_text_from_pptx(file_content):
+    try:
+        from pptx import Presentation
+        prs = Presentation(io.BytesIO(file_content))
+        text = []
+        for slide in prs.slides:
+            for shape in slide.shapes:
+                if hasattr(shape, "text"):
+                    text.append(shape.text)
+        return "\n".join(text)
+    except Exception as e:
+        return f"Error reading PPTX: {e}"
+
+def generate_flashcards(text, api_key):
+    try:
+        parser = PydanticOutputParser(pydantic_object=FlashcardList)
+        
+        prompt = ChatPromptTemplate.from_messages([
+            HumanMessagePromptTemplate.from_template(
+                """You are a flashcard generator for theory-based subjects.
+                You must ONLY use information that appears in the provided text.
+                Generate as many flashcards as possible from the text (aim for at least 20 if content allows).
+                Each flashcard must:
+                - Have a clear and concise question
+                - Provide a detailed 2-3 sentence answer
+                - Stay strictly factual, based only on the provided text
+                {format_instructions}
+                Text: {input_text}"""
+            )
+        ]).partial(format_instructions=parser.get_format_instructions())
+        
+        llm = ChatOpenAI(
+            model="gpt-4o-mini",
+            temperature=0.3,
+            api_key=api_key,
+            max_tokens=2000
+        )
+        chain = prompt | llm | parser
+        
+        # Chunk text if too long
+        chunk_size = 4000
+        chunks = [text[i:i+chunk_size] for i in range(0, len(text), chunk_size)]
+        
+        all_flashcards = []
+        for chunk in chunks:
+            if chunk.strip():
+                result = chain.invoke({"input_text": chunk})
+                all_flashcards.extend(result.flashcards)
+        
+        return [{"question": card.question, "answer": card.answer} for card in all_flashcards]
+    except Exception as e:
+        raise Exception(f"Error generating flashcards: {str(e)}")
+
+class handler(BaseHTTPRequestHandler):
+    def do_POST(self):
+        try:
+            # Get API key from environment
+            api_key = os.environ.get('OPENAI_API_KEY')
+            if not api_key:
+                self.send_error(500, "OpenAI API key not configured")
+                return
+            
+            # Parse request
+            content_length = int(self.headers['Content-Length'])
+            post_data = self.rfile.read(content_length)
+            data = json.loads(post_data.decode('utf-8'))
+            
+            file_content = base64.b64decode(data['file_content'])
+            file_type = data['file_type']
+            
+            # Extract text based on file type
+            if file_type == 'application/pdf':
+                text = extract_text_from_pdf(file_content)
+            elif file_type == 'text/plain':
+                text = file_content.decode('utf-8')
+            elif file_type == 'application/vnd.openxmlformats-officedocument.wordprocessingml.document':
+                text = extract_text_from_docx(file_content)
+            elif file_type == 'application/vnd.openxmlformats-officedocument.presentationml.presentation':
+                text = extract_text_from_pptx(file_content)
+            else:
+                self.send_error(400, "Unsupported file type")
+                return
+            
+            if not text.strip():
+                self.send_error(400, "Could not extract text from file")
+                return
+            
+            # Generate flashcards
+            flashcards = generate_flashcards(text, api_key)
+            
+            # Send response
+            self.send_response(200)
+            self.send_header('Content-type', 'application/json')
+            self.send_header('Access-Control-Allow-Origin', '*')
+            self.end_headers()
+            
+            response = {
+                'success': True,
+                'flashcards': flashcards,
+                'count': len(flashcards)
+            }
+            
+            self.wfile.write(json.dumps(response).encode('utf-8'))
+            
+        except Exception as e:
+            self.send_response(500)
+            self.send_header('Content-type', 'application/json')
+            self.send_header('Access-Control-Allow-Origin', '*')
+            self.end_headers()
+            
+            error_response = {
+                'success': False,
+                'error': str(e)
+            }
+            
+            self.wfile.write(json.dumps(error_response).encode('utf-8'))
+    
+    def do_OPTIONS(self):
+        self.send_response(200)
+        self.send_header('Access-Control-Allow-Origin', '*')
+        self.send_header('Access-Control-Allow-Methods', 'POST, OPTIONS')
+        self.send_header('Access-Control-Allow-Headers', 'Content-Type')
+        self.end_headers()
