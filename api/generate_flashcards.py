@@ -2,14 +2,15 @@
 import json
 import io
 import os
+import base64
 from typing import List
 import pdfplumber
 from langchain_openai import ChatOpenAI
 from langchain_core.prompts import ChatPromptTemplate, HumanMessagePromptTemplate
 from langchain_core.output_parsers import PydanticOutputParser
 from pydantic import BaseModel, Field
-import base64
 
+# ----- Pydantic models -----
 class Flashcard(BaseModel):
     question: str = Field(description="The question on the flashcard")
     answer: str = Field(description="The answer on the flashcard")
@@ -17,6 +18,7 @@ class Flashcard(BaseModel):
 class FlashcardList(BaseModel):
     flashcards: List[Flashcard] = Field(description="List of flashcards")
 
+# ----- Text extraction -----
 def extract_text_from_pdf(file_content):
     try:
         with pdfplumber.open(io.BytesIO(file_content)) as pdf:
@@ -45,68 +47,63 @@ def extract_text_from_pptx(file_content):
     except Exception as e:
         return f"Error reading PPTX: {e}"
 
+# ----- Flashcard generation -----
 def generate_flashcards(text, api_key):
-    try:
-        parser = PydanticOutputParser(pydantic_object=FlashcardList)
-        
-        prompt = ChatPromptTemplate.from_messages([
-            HumanMessagePromptTemplate.from_template(
-                """You are a flashcard generator for theory-based subjects.
-                You must ONLY use information that appears in the provided text.
-                Generate as many flashcards as possible from the text (aim for at least 20 if content allows).
-                Each flashcard must:
-                - Have a clear and concise question
-                - Provide a detailed 2-3 sentence answer
-                - Stay strictly factual, based only on the provided text
-                {format_instructions}
-                Text: {input_text}"""
-            )
-        ]).partial(format_instructions=parser.get_format_instructions())
-        
-        llm = ChatOpenAI(
-            model="gpt-4o-mini",
-            temperature=0.3,
-            api_key=api_key,
-            max_tokens=2000
+    parser = PydanticOutputParser(pydantic_object=FlashcardList)
+    prompt = ChatPromptTemplate.from_messages([
+        HumanMessagePromptTemplate.from_template(
+            """You are a flashcard generator for theory-based subjects.
+            You must ONLY use information that appears in the provided text.
+            Generate as many flashcards as possible (aim for at least 20 if content allows).
+            Each flashcard must:
+            - Have a clear question
+            - Provide a 2-3 sentence answer
+            - Stay strictly factual, based only on the provided text
+            {format_instructions}
+            Text: {input_text}"""
         )
-        chain = prompt | llm | parser
-        
-        # Chunk text if too long
-        chunk_size = 4000
-        chunks = [text[i:i+chunk_size] for i in range(0, len(text), chunk_size)]
-        
-        all_flashcards = []
-        for chunk in chunks:
-            if chunk.strip():
-                result = chain.invoke({"input_text": chunk})
-                all_flashcards.extend(result.flashcards)
-        
-        return [{"question": card.question, "answer": card.answer} for card in all_flashcards]
-    except Exception as e:
-        raise Exception(f"Error generating flashcards: {str(e)}")
+    ]).partial(format_instructions=parser.get_format_instructions())
 
-# Vercel requires a default handler function
+    llm = ChatOpenAI(
+        model="gpt-4o-mini",
+        temperature=0.3,
+        api_key=api_key,
+        max_tokens=2000
+    )
+    chain = prompt | llm | parser
+
+    # Chunk text to avoid token limits
+    chunk_size = 4000
+    chunks = [text[i:i+chunk_size] for i in range(0, len(text), chunk_size)]
+    all_flashcards = []
+    for chunk in chunks:
+        if chunk.strip():
+            result = chain.invoke({"input_text": chunk})
+            all_flashcards.extend(result.flashcards)
+    return [{"question": c.question, "answer": c.answer} for c in all_flashcards]
+
+# ----- Vercel handler -----
 def handler(event, context):
-    if event['httpMethod'] == 'OPTIONS':
-        return {
-            'statusCode': 200,
-            'headers': {
-                'Access-Control-Allow-Origin': '*',
-                'Access-Control-Allow-Methods': 'POST, OPTIONS',
-                'Access-Control-Allow-Headers': 'Content-Type',
-            },
-            'body': ''
-        }
-
-    if event['httpMethod'] != 'POST':
-        return {
-            'statusCode': 405,
-            'headers': {'Content-Type': 'application/json'},
-            'body': json.dumps({'success': False, 'error': 'Method not allowed'})
-        }
-
     try:
-        # Get API key from environment
+        if event['httpMethod'] == 'OPTIONS':
+            return {
+                'statusCode': 200,
+                'headers': {
+                    'Access-Control-Allow-Origin': '*',
+                    'Access-Control-Allow-Methods': 'POST, OPTIONS',
+                    'Access-Control-Allow-Headers': 'Content-Type',
+                },
+                'body': ''
+            }
+
+        if event['httpMethod'] != 'POST':
+            return {
+                'statusCode': 405,
+                'headers': {'Content-Type': 'application/json'},
+                'body': json.dumps({'success': False, 'error': 'Method not allowed'})
+            }
+
+        # Get OpenAI API key
         api_key = os.environ.get('OPENAI_API_KEY')
         if not api_key:
             return {
@@ -114,8 +111,8 @@ def handler(event, context):
                 'headers': {'Content-Type': 'application/json'},
                 'body': json.dumps({'success': False, 'error': 'OpenAI API key not configured'})
             }
-        
-        # Parse request body
+
+        # Parse JSON body
         content_type = event['headers'].get('content-type', '')
         if 'application/json' not in content_type:
             return {
@@ -127,8 +124,8 @@ def handler(event, context):
         body = json.loads(event['body'])
         file_content = base64.b64decode(body['file_content'])
         file_type = body['file_type']
-        
-        # Extract text based on file type
+
+        # Extract text
         if file_type == 'application/pdf':
             text = extract_text_from_pdf(file_content)
         elif file_type == 'text/plain':
@@ -143,18 +140,16 @@ def handler(event, context):
                 'headers': {'Content-Type': 'application/json'},
                 'body': json.dumps({'success': False, 'error': 'Unsupported file type'})
             }
-        
+
         if not text.strip():
             return {
                 'statusCode': 400,
                 'headers': {'Content-Type': 'application/json'},
                 'body': json.dumps({'success': False, 'error': 'Could not extract text from file'})
             }
-        
+
         # Generate flashcards
         flashcards = generate_flashcards(text, api_key)
-        
-        # Return success response
         return {
             'statusCode': 200,
             'headers': {
@@ -167,8 +162,9 @@ def handler(event, context):
                 'count': len(flashcards)
             })
         }
-        
+
     except Exception as e:
+        # Return JSON even on error
         return {
             'statusCode': 500,
             'headers': {
