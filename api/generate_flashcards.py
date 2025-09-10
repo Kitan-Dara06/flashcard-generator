@@ -5,11 +5,11 @@ import os
 import base64
 from typing import List
 import pdfplumber
+from http.server import BaseHTTPRequestHandler
 from langchain_openai import ChatOpenAI
 from langchain_core.prompts import ChatPromptTemplate, HumanMessagePromptTemplate
 from langchain_core.output_parsers import PydanticOutputParser
 from pydantic import BaseModel, Field
-from vercel_event_handler import VercelHandler   # <-- NEW import
 
 # ----- Pydantic models -----
 class Flashcard(BaseModel):
@@ -83,100 +83,122 @@ def generate_flashcards(text, api_key):
             all_flashcards.extend(result.flashcards)
     return [{"question": c.question, "answer": c.answer} for c in all_flashcards]
 
-# ----- Main logic -----
-def lambda_handler(event, context=None):
+# ----- Core handler logic -----
+def lambda_handler(event):
     try:
-        if event['httpMethod'] == 'OPTIONS':
+        if event["httpMethod"] == "OPTIONS":
             return {
-                'statusCode': 200,
-                'headers': {
-                    'Access-Control-Allow-Origin': '*',
-                    'Access-Control-Allow-Methods': 'POST, OPTIONS',
-                    'Access-Control-Allow-Headers': 'Content-Type',
+                "statusCode": 200,
+                "headers": {
+                    "Access-Control-Allow-Origin": "*",
+                    "Access-Control-Allow-Methods": "POST, OPTIONS",
+                    "Access-Control-Allow-Headers": "Content-Type",
                 },
-                'body': ''
+                "body": ""
             }
 
-        if event['httpMethod'] != 'POST':
+        if event["httpMethod"] != "POST":
             return {
-                'statusCode': 405,
-                'headers': {'Content-Type': 'application/json'},
-                'body': json.dumps({'success': False, 'error': 'Method not allowed'})
+                "statusCode": 405,
+                "headers": {"Content-Type": "application/json"},
+                "body": json.dumps({"success": False, "error": "Method not allowed"})
             }
 
         # Get OpenAI API key
-        api_key = os.environ.get('OPENAI_API_KEY')
+        api_key = os.environ.get("OPENAI_API_KEY")
         if not api_key:
             return {
-                'statusCode': 500,
-                'headers': {'Content-Type': 'application/json'},
-                'body': json.dumps({'success': False, 'error': 'OpenAI API key not configured'})
+                "statusCode": 500,
+                "headers": {"Content-Type": "application/json"},
+                "body": json.dumps({"success": False, "error": "OpenAI API key not configured"})
             }
 
         # Parse JSON body
-        content_type = event['headers'].get('content-type', '')
-        if 'application/json' not in content_type:
+        content_type = event["headers"].get("content-type", "")
+        if "application/json" not in content_type:
             return {
-                'statusCode': 400,
-                'headers': {'Content-Type': 'application/json'},
-                'body': json.dumps({'success': False, 'error': 'Content-Type must be application/json'})
+                "statusCode": 400,
+                "headers": {"Content-Type": "application/json"},
+                "body": json.dumps({"success": False, "error": "Content-Type must be application/json"})
             }
 
-        body = json.loads(event['body'])
-        file_content = base64.b64decode(body['file_content'])
-        file_type = body['file_type']
+        body = json.loads(event["body"])
+        file_content = base64.b64decode(body["file_content"])
+        file_type = body["file_type"]
 
         # Extract text
-        if file_type == 'application/pdf':
+        if file_type == "application/pdf":
             text = extract_text_from_pdf(file_content)
-        elif file_type == 'text/plain':
-            text = file_content.decode('utf-8')
-        elif file_type == 'application/vnd.openxmlformats-officedocument.wordprocessingml.document':
+        elif file_type == "text/plain":
+            text = file_content.decode("utf-8")
+        elif file_type == "application/vnd.openxmlformats-officedocument.wordprocessingml.document":
             text = extract_text_from_docx(file_content)
-        elif file_type == 'application/vnd.openxmlformats-officedocument.presentationml.presentation':
+        elif file_type == "application/vnd.openxmlformats-officedocument.presentationml.presentation":
             text = extract_text_from_pptx(file_content)
         else:
             return {
-                'statusCode': 400,
-                'headers': {'Content-Type': 'application/json'},
-                'body': json.dumps({'success': False, 'error': 'Unsupported file type'})
+                "statusCode": 400,
+                "headers": {"Content-Type": "application/json"},
+                "body": json.dumps({"success": False, "error": "Unsupported file type"})
             }
 
         if not text.strip():
             return {
-                'statusCode': 400,
-                'headers': {'Content-Type': 'application/json'},
-                'body': json.dumps({'success': False, 'error': 'Could not extract text from file'})
+                "statusCode": 400,
+                "headers": {"Content-Type": "application/json"},
+                "body": json.dumps({"success": False, "error": "Could not extract text from file"})
             }
 
         # Generate flashcards
         flashcards = generate_flashcards(text, api_key)
         return {
-            'statusCode': 200,
-            'headers': {
-                'Content-Type': 'application/json',
-                'Access-Control-Allow-Origin': '*'
+            "statusCode": 200,
+            "headers": {
+                "Content-Type": "application/json",
+                "Access-Control-Allow-Origin": "*"
             },
-            'body': json.dumps({
-                'success': True,
-                'flashcards': flashcards,
-                'count': len(flashcards)
+            "body": json.dumps({
+                "success": True,
+                "flashcards": flashcards,
+                "count": len(flashcards)
             })
         }
 
     except Exception as e:
-        # Return JSON even on error
         return {
-            'statusCode': 500,
-            'headers': {
-                'Content-Type': 'application/json',
-                'Access-Control-Allow-Origin': '*'
+            "statusCode": 500,
+            "headers": {
+                "Content-Type": "application/json",
+                "Access-Control-Allow-Origin": "*"
             },
-            'body': json.dumps({
-                'success': False,
-                'error': str(e)
+            "body": json.dumps({
+                "success": False,
+                "error": str(e)
             })
         }
 
-# ----- Export for Vercel -----
-handler = VercelHandler(lambda_handler)
+# ----- Vercel entrypoint -----
+class handler(BaseHTTPRequestHandler):
+    def do_POST(self):
+        content_length = int(self.headers.get("Content-Length", 0))
+        body = self.rfile.read(content_length).decode("utf-8")
+        event = {
+            "httpMethod": "POST",
+            "headers": dict(self.headers),
+            "body": body
+        }
+        response = lambda_handler(event)
+
+        self.send_response(response["statusCode"])
+        for k, v in response.get("headers", {}).items():
+            self.send_header(k, v)
+        self.end_headers()
+        self.wfile.write(response["body"].encode())
+
+    def do_OPTIONS(self):
+        response = lambda_handler({"httpMethod": "OPTIONS", "headers": {}, "body": ""})
+        self.send_response(response["statusCode"])
+        for k, v in response.get("headers", {}).items():
+            self.send_header(k, v)
+        self.end_headers()
+        self.wfile.write(response["body"].encode())
