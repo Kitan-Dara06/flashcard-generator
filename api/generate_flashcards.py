@@ -9,6 +9,7 @@ from langchain_openai import ChatOpenAI
 from langchain_core.prompts import ChatPromptTemplate, HumanMessagePromptTemplate
 from langchain_core.output_parsers import PydanticOutputParser
 from pydantic import BaseModel, Field
+from vercel_event_handler import VercelHandler   # <-- NEW import
 
 # ----- Pydantic models -----
 class Flashcard(BaseModel):
@@ -82,8 +83,8 @@ def generate_flashcards(text, api_key):
             all_flashcards.extend(result.flashcards)
     return [{"question": c.question, "answer": c.answer} for c in all_flashcards]
 
-# ----- Vercel handler -----
-def handler(event, context):
+# ----- Main logic -----
+def lambda_handler(event, context=None):
     try:
         if event['httpMethod'] == 'OPTIONS':
             return {
@@ -176,3 +177,6 @@ def handler(event, context):
                 'error': str(e)
             })
         }
+
+# ----- Export for Vercel -----
+handler = VercelHandler(lambda_handler)
