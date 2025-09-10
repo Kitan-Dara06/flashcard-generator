@@ -1,9 +1,4 @@
 {
-  "functions": {
-    "api/generate_flashcards.py": {
-      "runtime": "python3.11"
-    }
-  },
   "rewrites": [
     {
       "source": "/api/(.*)",
